@@ -36,8 +36,8 @@ export default function FruitCommentForm(props: Props) {
       <button
         className={style.button}
         formAction={async () => {
-          router.refresh();
           await createOrUpdateComment(props.fruitId, comment);
+          router.refresh();
         }}
       >
         Update Comment

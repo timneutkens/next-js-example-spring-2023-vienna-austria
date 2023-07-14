@@ -1,38 +1,65 @@
-FROM node:18-alpine AS builder
-ENV NODE_ENV production
-# Install necessary tools
-RUN apk add --no-cache libc6-compat yq --repository=https://dl-cdn.alpinelinux.org/alpine/edge/community
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+FROM amd64/node:18-bookworm AS base
+
+# Install dependencies only when needed
+FROM base AS deps
+# Check https://github.com/nodejs/docker-node/tree/b4117f9333da4138b03a546ec926ef50a31506c3#nodealpine to understand why libc6-compat might be needed.
+# RUN apk add --no-cache libc6-compat valgrind
 WORKDIR /app
-# Copy the content of the project to the machine
+
+# Install dependencies based on the preferred package manager
+COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
+RUN \
+  if [ -f yarn.lock ]; then yarn --frozen-lockfile; \
+  elif [ -f package-lock.json ]; then npm ci; \
+  elif [ -f pnpm-lock.yaml ]; then yarn global add pnpm && pnpm i --frozen-lockfile; \
+  else echo "Lockfile not found." && exit 1; \
+  fi
+
+
+# Rebuild the source code only when needed
+FROM base AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN yq --inplace --output-format=json '(.dependencies = .dependencies * (.devDependencies | to_entries | map(select(.key | test("^(typescript|@types/*|eslint-config-upleveled)$"))) | from_entries)) | (.devDependencies = {})' package.json
-RUN pnpm install
-RUN pnpm build
 
-# Multi-stage builds: runner stage
-FROM node:18-alpine AS runner
-ENV NODE_ENV production
-# Install necessary tools
-RUN apk add bash postgresql
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Next.js collects completely anonymous telemetry data about general usage.
+# Learn more here: https://nextjs.org/telemetry
+# Uncomment the following line in case you want to disable telemetry during the build.
+# ENV NEXT_TELEMETRY_DISABLED 1
+
+RUN yarn build
+
+# If using npm comment out above and use below instead
+# RUN npm run build
+
+# Production image, copy all the files and run next
+FROM base AS runner
 WORKDIR /app
 
-# Copy built app
-COPY --from=builder /app/.next ./.next
+RUN apt-get update
+RUN apt-get upgrade -y
+RUN apt-get install valgrind -y
 
-# Copy only necessary files to run the app (minimize production app size, improve performance)
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/migrations ./migrations
+ENV NODE_ENV production
+# Uncomment the following line in case you want to disable telemetry during runtime.
+# ENV NEXT_TELEMETRY_DISABLED 1
+
+# RUN apk add valgrind
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
 COPY --from=builder /app/public ./public
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/.env.production ./
-COPY --from=builder /app/next.config.js ./
+COPY --from=builder /app/libleak.so ./libleak.so
 
-# Copy start script and make it executable
-COPY --from=builder /app/scripts ./scripts
-RUN chmod +x /app/scripts/fly-io-start.sh
+# Automatically leverage output traces to reduce image size
+# https://nextjs.org/docs/advanced-features/output-file-tracing
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-CMD ["./scripts/fly-io-start.sh"]
+USER nextjs
+
+EXPOSE 3000
+
+ENV PORT 3000
+
+CMD ["valgrind", "--trace-children=yes" "node", "server.js"]

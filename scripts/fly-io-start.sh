@@ -45,4 +45,4 @@ SQL
 fi
 
 pnpm migrate up
-pnpm start
+valgrind ./node_modules/.bin/next start
